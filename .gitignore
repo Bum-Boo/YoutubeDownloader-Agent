@@ -7,6 +7,7 @@
 # Build results
 bin/
 obj/
+artifacts/
 
 # Avalonia
 .avalonia-build-tasks/

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>youtube-downloader-agent</AssemblyName>
+    <RootNamespace>YoutubeDownloader.Agent</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../YoutubeDownloader.Core/YoutubeDownloader.Core.csproj" />
+  </ItemGroup>
+</Project>
