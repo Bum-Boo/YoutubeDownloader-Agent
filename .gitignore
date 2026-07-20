@@ -14,3 +14,7 @@ artifacts/
 
 # Test results
 TestResults/
+
+# Python helper cache
+__pycache__/
+*.pyc
