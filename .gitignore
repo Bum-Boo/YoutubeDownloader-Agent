@@ -9,6 +9,10 @@ bin/
 obj/
 artifacts/
 
+# Local runtime data and bundled tools
+/downloads/
+/tools/
+
 # Avalonia
 .avalonia-build-tasks/
 
