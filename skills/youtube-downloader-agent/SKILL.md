@@ -56,7 +56,7 @@ The binary is resolved from `YOUTUBE_DOWNLOADER_AGENT_BIN` or `~/.local/share/yo
 
 ## Defaults
 
-- Video: `mp4`, `1080p`, subtitles included
+- Video: `mp4`, `highest`, subtitles included
 - Audio-only: `mp3`
 - Single URL: `--limit 1`
 - Multi-video jobs: no implicit unlimited mode

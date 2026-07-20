@@ -29,7 +29,10 @@ The upstream project is optimized for interactive desktop use. AI agents need a 
 - Select `highest`, `1080p`, `720p`, `480p`, `360p`, or `lowest`
 - Embed available subtitles by default
 - Limit playlist/channel jobs with `--limit`
-- Emit progress, completion, summary, and errors as one JSON object per line
+- Resume interrupted batches with a persistent video-ID archive
+- Retry individual failures without stopping the remaining queue
+- Record completed and failed items in a JSON Lines manifest
+- Emit progress, completion, skip, retry, failure, and summary events as JSON Lines
 - Reject output paths outside `--output-root`
 - Refuse downloads unless `--confirm-rights` is present
 
@@ -66,7 +69,7 @@ dotnet run --project YoutubeDownloader.Agent -- \
   probe --url "https://www.youtube.com/watch?v=VIDEO_ID" --limit 5
 ```
 
-Download one authorized video as 1080p MP4:
+Download one authorized video at the highest available quality as MP4:
 
 ```bash
 dotnet run --project YoutubeDownloader.Agent -- \
@@ -75,7 +78,7 @@ dotnet run --project YoutubeDownloader.Agent -- \
   --confirm-rights \
   --output-root "/media/archive" \
   --output "/media/archive/incoming" \
-  --quality 1080p \
+  --quality highest \
   --format mp4
 ```
 

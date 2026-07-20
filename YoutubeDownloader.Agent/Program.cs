@@ -79,9 +79,15 @@ internal static class AgentCli
 
         var limit = PositiveInt(Optional(args, "--limit") ?? "1", "--limit");
         var format = (Optional(args, "--format") ?? "mp4").ToLowerInvariant();
-        var quality = ParseQuality(Optional(args, "--quality") ?? "1080p");
+        var quality = ParseQuality(Optional(args, "--quality") ?? "highest");
         var includeSubtitles = !HasFlag(args, "--no-subtitles");
         var ffmpeg = Optional(args, "--ffmpeg");
+        var retries = NonNegativeInt(Optional(args, "--retries") ?? "2", "--retries");
+        var stateDirectory = Path.Combine(root, ".youtube-downloader-agent");
+        var archivePath = Path.GetFullPath(Optional(args, "--archive") ?? Path.Combine(stateDirectory, "archive.txt"));
+        var manifestPath = Path.GetFullPath(Optional(args, "--manifest") ?? Path.Combine(stateDirectory, "manifest.jsonl"));
+        EnsureInsideRoot(root, archivePath);
+        EnsureInsideRoot(root, manifestPath);
         var container = format switch
         {
             "mp4" => Container.Mp4,
@@ -92,6 +98,13 @@ internal static class AgentCli
         };
 
         Directory.CreateDirectory(output);
+        Directory.CreateDirectory(stateDirectory);
+        Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+        var archivedIds = File.Exists(archivePath)
+            ? File.ReadLines(archivePath).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+
         using var resolver = new QueryResolver();
         using var downloader = new VideoDownloader();
         var result = await resolver.ResolveAsync(query);
@@ -100,44 +113,95 @@ internal static class AgentCli
             return Fail("no_videos", "The query resolved without videos.", 4);
 
         var completed = new List<object>();
+        var failures = new List<object>();
+        var skipped = 0;
         foreach (var (video, index) in videos.Select((video, index) => (video, index)))
         {
-            var option = await downloader.GetBestDownloadOptionAsync(
-                video.Id,
-                new VideoDownloadPreference(container, quality),
-                includeLanguageSpecificAudioStreams: false
-            );
-            var fileName = FileNameTemplate.Apply("$uploadDate - $title [$id]", video, option.Container);
-            var filePath = Path.Combine(output, fileName);
-            EnsureInsideRoot(root, filePath);
-
-            var lastProgress = -1;
-            var progress = new Progress<Gress.Percentage>(p =>
+            var videoId = video.Id.ToString();
+            if (archivedIds.Contains(videoId))
             {
-                var value = (int)Math.Floor(p.Value);
-                if (value < 100 && value / 10 != lastProgress / 10)
+                skipped++;
+                WriteJson(new { ok = true, @event = "skipped", videoId, reason = "archived" });
+                continue;
+            }
+
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= retries + 1; attempt++)
+            {
+                try
                 {
-                    lastProgress = value;
-                    WriteJson(new { ok = true, @event = "progress", videoId = video.Id.ToString(), percent = value });
-                }
-            });
+                    var option = await downloader.GetBestDownloadOptionAsync(
+                        video.Id,
+                        new VideoDownloadPreference(container, quality),
+                        includeLanguageSpecificAudioStreams: false
+                    );
+                    var fileName = FileNameTemplate.Apply("$uploadDate - $title [$id]", video, option.Container);
+                    var filePath = Path.Combine(output, fileName);
+                    EnsureInsideRoot(root, filePath);
 
-            await downloader.DownloadVideoAsync(filePath, video, option, includeSubtitles, ffmpeg, progress);
-            var info = new FileInfo(filePath);
-            completed.Add(new
+                    var lastProgress = -1;
+                    var progress = new Progress<Gress.Percentage>(p =>
+                    {
+                        var value = (int)Math.Floor(p.Value);
+                        if (value < 100 && value / 10 != lastProgress / 10)
+                        {
+                            lastProgress = value;
+                            WriteJson(new { ok = true, @event = "progress", videoId, percent = value, attempt });
+                        }
+                    });
+
+                    await downloader.DownloadVideoAsync(filePath, video, option, includeSubtitles, ffmpeg, progress);
+                    var info = new FileInfo(filePath);
+                    if (!info.Exists || info.Length == 0)
+                        throw new IOException("Downloader completed without a non-empty output file.");
+
+                    var item = new
+                    {
+                        id = videoId,
+                        video.Title,
+                        path = info.FullName,
+                        bytes = info.Length,
+                        container = option.Container.Name,
+                        index = index + 1,
+                        attempt,
+                    };
+                    completed.Add(item);
+                    await File.AppendAllTextAsync(archivePath, videoId + Environment.NewLine);
+                    archivedIds.Add(videoId);
+                    await AppendManifestAsync(manifestPath, new { ok = true, @event = "completed", item, timestampUtc = DateTimeOffset.UtcNow });
+                    WriteJson(new { ok = true, @event = "completed", videoId, path = info.FullName, bytes = info.Length, attempt });
+                    lastError = null;
+                    break;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lastError = ex;
+                    WriteJson(new { ok = false, @event = attempt <= retries ? "retry" : "failed", videoId, attempt, message = ex.Message });
+                }
+            }
+
+            if (lastError is not null)
             {
-                id = video.Id.ToString(),
-                video.Title,
-                path = info.FullName,
-                bytes = info.Length,
-                container = option.Container.Name,
-                index = index + 1,
-            });
-            WriteJson(new { ok = true, @event = "completed", videoId = video.Id.ToString(), path = info.FullName, bytes = info.Length });
+                var failure = new { id = videoId, video.Title, index = index + 1, message = lastError.Message };
+                failures.Add(failure);
+                await AppendManifestAsync(manifestPath, new { ok = false, @event = "failed", failure, timestampUtc = DateTimeOffset.UtcNow });
+            }
         }
 
-        WriteJson(new { ok = true, command = "download", count = completed.Count, files = completed });
-        return 0;
+        WriteJson(new
+        {
+            ok = failures.Count == 0,
+            command = "download",
+            requested = videos.Length,
+            completed = completed.Count,
+            skipped,
+            failed = failures.Count,
+            files = completed,
+            failures,
+            archive = archivePath,
+            manifest = manifestPath,
+        });
+        return failures.Count == 0 ? 0 : 5;
     }
 
     private static int SelfTest()
@@ -152,6 +216,9 @@ internal static class AgentCli
         WriteJson(new { ok = true, command = "self-test", checks = new[] { "output_root_accept", "output_root_escape_reject", "argument_parser" } });
         return 0;
     }
+
+    private static async Task AppendManifestAsync(string path, object value) =>
+        await File.AppendAllTextAsync(path, JsonSerializer.Serialize(value, JsonOptions) + Environment.NewLine);
 
     private static void EnsureInsideRoot(string root, string candidate)
     {
@@ -187,6 +254,9 @@ internal static class AgentCli
     private static int PositiveInt(string value, string name) =>
         int.TryParse(value, out var parsed) && parsed > 0 ? parsed : throw new ArgumentException($"{name} must be a positive integer.");
 
+    private static int NonNegativeInt(string value, string name) =>
+        int.TryParse(value, out var parsed) && parsed >= 0 ? parsed : throw new ArgumentException($"{name} must be zero or a positive integer.");
+
     private static int Fail(string code, string message, int exitCode)
     {
         WriteJson(new { ok = false, error = new { code, message } });
@@ -202,7 +272,8 @@ Commands:
   probe --url URL [--limit N]
   download --url URL --confirm-rights [--output-root DIR] [--output DIR]
            [--limit N] [--format mp4|webm|mp3|ogg] [--quality highest|1080p|720p|480p|360p|lowest]
-           [--no-subtitles] [--ffmpeg PATH]
+           [--no-subtitles] [--ffmpeg PATH] [--retries N]
+           [--archive PATH] [--manifest PATH]
   self-test
 
 Every machine-readable result is emitted as one JSON object per line.
